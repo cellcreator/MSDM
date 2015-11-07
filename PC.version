@@ -1,0 +1,275 @@
+##### This script is originally created by David Smith (https://github.com/dksmith01) for Mac OS or Linux system. 
+##### Modified by Lingyu Wang to be able to run on a Windows system.
+
+import xlrd
+import os
+import csv
+from tarfile import TarFile
+import pprint
+import re
+import codecs
+import json
+
+# NOTE: change the "tgz_extract_directory" to your own directory in your PC. 
+tgz_extract_directory = 'G:\\python.projects\\poker.holdem\\data\\'
+OUTFILE = tgz_extract_directory + "cprg_hands.json"
+os.chdir(tgz_extract_directory)
+os.getcwd()
+
+# Global variables
+pot_cats = ["flop", "turn", "river", "showdown"]
+deck = {'A': 'ace', 'K': 'king', 'Q': 'queen', 'J': 'jack', 'T': '10'}
+suits = {'c': 'clubs', 's': 'spades', 'h': 'hearts', 'd': 'diamonds'}
+bet_action_codes = {
+            '-' : 'no action',
+            'B' : 'blind bet',
+            'f' : 'fold',
+            'k' : 'check',
+            'b' : 'bet',
+            'c' : 'call',
+            'r' : 'raise',
+            'A' : 'all-in',
+            'Q' : 'quits game',
+            'K' : 'kicked from game'
+            }
+bet_action_cats = ["pre-flop", "flop", "turn", "river"]
+folder_search_re = re.compile(r'\d{6}$', re.IGNORECASE)
+tgz_search_re = re.compile(r'^\S*.\d{6}.tgz$', re.IGNORECASE)
+valid_game_types = {"holdem", "holdem1", "holdem2", "holdem3", "holdemii", "holdempot", "nolimit", "tourney"}
+
+##### Will run fowllowing codes at the end. Need to define 7 functions first.
+# file_groups = loop_tgz(tgz_extract_directory)
+# if os.path.isfile(OUTFILE): os.remove(OUTFILE)
+# loop_file_groups(file_groups)
+# print "All done!"
+
+## 1
+def loop_tgz(extract_dir):
+    file_groups = []
+    for root, dirs, files in os.walk(tgz_extract_directory, topdown=False):
+        for file in files:            
+            tgz = tgz_search_re.search(file)
+            if tgz:
+                tgz_file = os.path.join(root, file)
+                print tgz_file
+                game_type = tgz_file.split(".")[-3].split("/")[-1]
+                print game_type
+                file_yearmonth = tgz_file.split(".")[-2]
+                if game_type in valid_game_types:
+                    print "Extracting " + tgz_file
+                    tar = TarFile.open(tgz_file)
+                    tar.extractall(extract_dir)
+                    tar.close()
+                    file_groups.append(tgz_extract_directory + game_type + "\\" + file_yearmonth + "\\")
+                else:
+                    print "Skipping " + tgz_file + " because it is for an invalid game type"
+    return file_groups
+
+
+## 2
+def loop_file_groups(file_groups):
+    total_to_process = len(file_groups)
+    i = 1
+    running_total = 0
+    for fg in file_groups:
+        hands = {}
+        hands_list = []
+        invalid_keys = set()
+        print "Processing " + fg + " (file group #" + str(i) + " of " + str(total_to_process) + ")"
+        hdb_file = fg + "hdb"
+        hroster_file = fg + "hroster"
+        pdb_directory = fg + "pdb\\"
+        hands, idp, inv_keys = parse_hdb_file(hdb_file, hands, invalid_keys)
+        hands, inv_keys = parse_hroster_file(hroster_file, idp, hands, inv_keys)
+        hands, inv_keys = loop_pdb_files(pdb_directory, hands, idp, inv_keys)
+        hands = {key: hands[key] for key in hands if key not in inv_keys}
+        hands_list = hands.values()
+        append_hands_list_to_json_file(hands_list)
+        print str(len(hands_list)) + " valid hands added to JSON file, " + str(len(inv_keys)) + " invalid hands"
+        running_total = running_total + len(hands_list)
+        print str(running_total) + " total hands added so far"
+        print "Finished processing " + fg
+        i = i + 1
+
+## 3
+def parse_hdb_file(hdb_file, hands, invalid_keys):
+    
+    try:
+        split_filename = hdb_file.split("/")
+        id_prefix = split_filename[-3] + "_" + split_filename[-2] + "_"
+        with open(hdb_file, "r") as hdb:
+            for line in hdb:
+                hand = {}
+                pot_data = []
+                board_card_data = []  
+                line_parts = line.strip("\n").split(" ")
+                line_parts = [elem for elem in line_parts if elem != '']
+                _id = id_prefix + line_parts[0]
+                hand["_id"] = _id
+                hand["game_type"] = split_filename[-3]
+                hand["dealer"] = line_parts[1]
+                hand["hand_num"] = line_parts[2]
+                hand["num_players"] = line_parts[3]
+                for lp in line_parts[4:8]:
+                    pot_data.append(lp)
+                for bcd in line_parts[8:]:
+                    board_card_data.append(bcd)
+
+                pots = []
+                i = 0
+                for p in pot_data:
+                    pot = {}
+                    pot["stage"] = pot_cats[i]
+                    if len(p.split("/")) == 2:
+                        pot["num_players"] = p.split("/")[0]
+                        pot["starting_pot_size"] = p.split("/")[1]
+                    else:
+                        invalid_keys.add(_id)
+                    pots.append(pot)
+                    i = i + 1
+
+                board = []
+                for b in board_card_data:
+                    board_card = {}
+                    if b != "":
+                        if board_card_data.index(b) + 1 <= 3:
+                            board_card["stage"] = "flop"
+                        elif board_card_data.index(b) + 1 == 4:
+                            board_card["stage"] = "turn"
+                        elif board_card_data.index(b) + 1 == 5:
+                            board_card["stage"] = "river"
+                        if b[0] in deck.keys():
+                            board_card["value"] = deck[b[0]]
+                        else:
+                            board_card["value"] = b[0]
+                        board_card["suit"] = suits[b[1]]
+                        board.append(board_card)
+
+                hand["pots"] = pots
+                hand["board"] = board
+                hands[_id] = hand
+        hdb.close()
+        return hands, id_prefix, invalid_keys
+    
+    except KeyError, e:
+        invalid_keys.add(_id)
+        hdb.close()
+        return hands, id_prefix, invalid_keys
+    
+## 4
+def parse_hroster_file(hroster_file, id_prefix, hands, invalid_keys):
+    
+    try:
+        with open(hroster_file, "r") as hroster:
+            for line in hroster:
+                players = {}
+                line_parts = line.strip("\n").split(" ")
+                line_parts = [elem for elem in line_parts if elem != ''] 
+                _id = id_prefix + line_parts[0]
+                player_data = line_parts[2:]
+                for p in player_data:
+                    player = {}
+                    player["username"] = p
+                    players[p] = player
+                if _id in hands:
+                    hands[_id]["players"] = players
+                else:
+                    invalid_keys.add(_id)
+        hroster.close()
+        return hands, invalid_keys
+
+    except KeyError, e:
+        invalid_keys.add(_id)
+        hroster.close()
+        return hands, invalid_keys
+
+    
+## 5
+def loop_pdb_files(pdb_file_directory, hands_col, id_prefix, invalid_keys):
+    for root, dirs, files in os.walk(pdb_file_directory, topdown=False):
+        for name in files:
+            pdb_file = os.path.join(root, name)
+            print pdb_file
+            hs = parse_pdb_file(pdb_file, id_prefix, hands_col, invalid_keys)
+    return hands_col, invalid_keys
+
+
+## 6
+def parse_pdb_file(pdb_file, id_prefix, hands, invalid_keys):
+    
+    try:
+        username = pdb_file.split(".")[-1]
+        with open(pdb_file, "r") as pdb:
+            for line in pdb:
+                line_parts = line.strip("\n").split(" ")
+                line_parts = [elem for elem in line_parts if elem != '']
+
+                _id = id_prefix + line_parts[1]
+                position = line_parts[3]
+
+                bet_actions = []
+                i = 0
+                for item in line_parts:
+                    bet_action = {}
+                    bet_action["actions"] = []
+                    if line_parts.index(item) >=4 and line_parts.index(item) <= 7:
+                        for b in item:
+                            bet_action["actions"].append(bet_action_codes[b])
+                        bet_action["stage"] = bet_action_cats[i]
+                        bet_actions.append(bet_action)
+                        i = i + 1
+                bankroll, action, winnings = line_parts[8:11]
+
+                player_cards = []
+                if len(line_parts) == 13:
+                    for item in line_parts[11:13]:
+                        player_card = {}
+                        if item[0] in deck.keys():
+                            player_card["value"] = deck[item[0]]
+                        else:
+                            player_card["value"] = item[0]
+                        player_card["suit"] = suits[item[1]]
+                        player_cards.append(player_card)              
+
+                if _id in hands: 
+                    if _id not in invalid_keys:
+                        if username in hands[_id]["players"]:
+                            hands[_id]["players"][username]["bet_actions"] = bet_actions
+                            hands[_id]["players"][username]["bankroll"] = int(bankroll)
+                            hands[_id]["players"][username]["action"] = int(action)
+                            hands[_id]["players"][username]["winnings"] = int(winnings)
+                            hands[_id]["players"][username]["player_cards"] = player_cards
+                            hands[_id]["players"][username]["position"] = int(position)
+                        else:
+                            invalid_keys.add(_id)
+                else:
+                    invalid_keys.add(_id)
+        pdb.close()
+        return hands, invalid_keys
+    
+    except IndexError, e:
+        invalid_keys.add(_id)
+        pdb.close()
+        return hands, invalid_keys
+    except KeyError, e:
+        invalid_keys.add(_id)
+        pdb.close()
+        return hands, invalid_keys
+    except ValueError, e:
+        invalid_keys.add(_id)
+        pdb.close()
+        return hands, invalid_keys
+
+    
+## 7
+def append_hands_list_to_json_file(hands_list):
+    with codecs.open(OUTFILE, "a") as fo:
+        for hand in hands_list:
+            fo.write(json.dumps(hand) + "\n")
+    fo.close()
+    
+
+file_groups = loop_tgz(tgz_extract_directory)
+if os.path.isfile(OUTFILE): os.remove(OUTFILE)
+loop_file_groups(file_groups)
+print "All done!"
